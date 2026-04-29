@@ -1,0 +1,975 @@
+// PostgreSQL — funktioniert auf Vercel (Neon, Supabase, etc.)
+// Lokal: Postgres via Docker oder Neon-DEV-Branch
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// =============================================================================
+// CORE — Tenant, Auth, Audit
+// =============================================================================
+
+model Tenant {
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  customDomain String?  @unique
+  domainStatus String   @default("pending")
+  name         String
+  primaryColor String   @default("#EEFF00")
+  logoUrl      String?
+  modulesJson  String   @default("{\"reservation\":true}")
+  apiKey       String   @unique @default(cuid())
+  locale       String   @default("de-AT")
+  timezone     String   @default("Europe/Vienna")
+  currency     String   @default("EUR")
+  vatNumber    String?
+  iban         String?
+  createdAt    DateTime @default(now())
+
+  courts            Court[]
+  members           Member[]
+  bookings          Booking[]
+  bookingRules      BookingRule[]
+  priceZones        PriceZone[]
+  subscriptions     Subscription[]
+  waitlistEntries   WaitlistEntry[]
+  membershipTypes   MembershipType[]
+  membershipPurchases MembershipPurchase[]
+  invoices          Invoice[]
+  ledgerEntries     LedgerEntry[]
+  accounts          Account[]
+  payments          Payment[]
+  pages             Page[]
+  newsItems         News[]
+  newsletters       Newsletter[]
+  sponsors          Sponsor[]
+  workAssignments   WorkAssignment[]
+  ladders           Ladder[]
+  tournaments       Tournament[]
+  teams             Team[]
+  leagueMatches     LeagueMatch[]
+  courses           Course[]
+  products          Product[]
+  sales             Sale[]
+  registerSessions  RegisterSession[]
+  devices           Device[]
+  matchRequests     MatchRequest[]
+  openSessions      OpenSession[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  users             User[]
+}
+
+// Auth (Magic-Link via NextAuth or simple credentials)
+model User {
+  id          String  @id @default(cuid())
+  tenantId    String
+  email       String
+  name        String?
+  passwordHash String? // null fuer magic-link only
+  role        String  @default("member") // superadmin|tenantAdmin|manager|member|guest
+  permissions String  @default("[]") // JSON-Array von Permission-Strings
+  twoFactorSecret String?
+  memberId    String? @unique
+  createdAt   DateTime @default(now())
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member   Member?  @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  sessions Session[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  tenantId  String
+  userId    String?
+  entity    String   // "Member", "Booking", etc.
+  entityId  String
+  action    String   // "create"|"update"|"delete"|"view"
+  diff      String?  // JSON: { before, after }
+  ip        String?
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@index([tenantId, entity, entityId])
+}
+
+// =============================================================================
+// COURTS & MEMBERS
+// =============================================================================
+
+model Court {
+  id        String  @id @default(cuid())
+  tenantId  String
+  name      String
+  surface   String  @default("clay") // clay|hard|grass|indoor|padel|beach
+  category  String  @default("outdoor") // outdoor|indoor|allweather|training|padel|other
+  order     Int     @default(0)
+  capacity  Int     @default(2) // fuer Beach-Volleyball etc.
+  active    Boolean @default(true)
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bookings       Booking[]
+  subscriptions  Subscription[]
+  priceTiers     PriceTier[]
+  deviceMappings DeviceMapping[]
+  leagueMatches  LeagueMatch[]
+  courseSessions CourseSession[]
+  matches        TournamentMatch[]
+  openSessions   OpenSession[]
+
+  @@index([tenantId])
+}
+
+model Member {
+  id            String    @id @default(cuid())
+  tenantId      String
+  email         String
+  name          String
+  phone         String?
+  birthdate     DateTime?
+  group         String    @default("adult") // child|youth|adult|senior|family|guest
+  status        String    @default("active") // active|inactive|left
+  customJson    String    @default("{}") // individuelle Felder
+  iban          String?
+  sepaMandate   String?
+  visibility    String    @default("members") // public|members|private (Spielpartner-Suche)
+  skillScore    Int       @default(1000) // ELO-aehnlich
+  createdAt     DateTime  @default(now())
+  leftAt        DateTime?
+  primaryFamilyMemberId String? // null wenn Hauptzahler
+
+  tenant              Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  primaryFamilyMember Member?               @relation("FamilyHead", fields: [primaryFamilyMemberId], references: [id], onDelete: SetNull)
+  dependents          Member[]              @relation("FamilyHead")
+  bookings            Booking[]
+  subscriptions       Subscription[]
+  waitlistEntries     WaitlistEntry[]
+  membershipPurchases MembershipPurchase[]
+  invoicesAsRecipient Invoice[]
+  ladderEntries       LadderParticipant[]
+  challengesIssued    Challenge[]           @relation("Challenger")
+  challengesReceived  Challenge[]           @relation("Challenged")
+  tournamentEntries   TournamentEntry[]
+  teamMemberships     TeamMember[]
+  courseRegistrations CourseRegistration[]
+  workAssignments     WorkAssignment[]
+  matchRequests       MatchRequest[]
+  payments            Payment[]
+  openSessionsHosted  OpenSession[]            @relation("OpenSessionHost")
+  openSessionsJoined  OpenSessionParticipant[] @relation("OpenSessionParticipant")
+  user                User?
+  wallet              Wallet?
+  sales               Sale[]
+  notifications       Notification[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([primaryFamilyMemberId])
+}
+
+model MembershipType {
+  id            String  @id @default(cuid())
+  tenantId      String
+  name          String  // "Erwachsen 2026", "Kind", "Familie"
+  fee           Int     // Euro-Cent
+  durationMonths Int    @default(12)
+  eligibleGroups String @default("[]") // JSON-Array welche Member-Groups das kaufen koennen
+  resultingGroup String  // welche group der Member nach Kauf bekommt
+  active        Boolean @default(true)
+  proratable    Boolean @default(true)
+
+  tenant    Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  purchases MembershipPurchase[]
+
+  @@index([tenantId])
+}
+
+model MembershipPurchase {
+  id          String   @id @default(cuid())
+  tenantId    String
+  memberId    String
+  typeId      String
+  validFrom   DateTime
+  validUntil  DateTime
+  pricePaid   Int      // Euro-Cent (kann von type.fee abweichen wegen Proration)
+  paid        Boolean  @default(false)
+  invoiceId   String?
+  createdAt   DateTime @default(now())
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member Member         @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  type   MembershipType @relation(fields: [typeId], references: [id])
+  invoice Invoice?      @relation(fields: [invoiceId], references: [id])
+
+  @@index([tenantId])
+  @@index([memberId])
+}
+
+// =============================================================================
+// RESERVATIONS
+// =============================================================================
+
+model Booking {
+  id          String   @id @default(cuid())
+  tenantId    String
+  courtId     String
+  memberId    String?
+  guestName   String?
+  startsAt    DateTime
+  endsAt      DateTime
+  pinCode     String?
+  paid        Boolean  @default(false)
+  pricePaid   Int      @default(0) // Euro-Cent
+  source      String   @default("web") // web|widget|admin|subscription
+  status      String   @default("confirmed") // confirmed|cancelled|noshow
+  cancelledAt DateTime?
+  partnerIdsJson String @default("[]") // JSON-Array von Member-IDs
+  createdAt   DateTime @default(now())
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  court        Court         @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  member       Member?       @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  payment      Payment?
+  accessGrant  AccessGrant?
+  subscriptionInstance Subscription? @relation("SubscriptionBooking", fields: [subscriptionId], references: [id], onDelete: SetNull)
+  subscriptionId String?
+
+  @@index([tenantId, startsAt])
+  @@index([courtId, startsAt])
+  @@index([memberId])
+}
+
+model BookingRule {
+  id           String  @id @default(cuid())
+  tenantId     String
+  name         String
+  scopeJson    String  @default("{}") // { groups: ["adult"], courts: ["..."], days: [1,2,3], hourFrom: 8, hourTo: 22 }
+  maxPerWeek   Int?
+  maxPerDay    Int?
+  maxOpenBookings Int?  // gleichzeitig offene zukuenftige
+  minAdvanceHours Int? @default(0)
+  maxAdvanceDays Int?  @default(14)
+  cancelDeadlineHours Int? @default(24)
+  minDurationMinutes Int @default(60)
+  maxDurationMinutes Int @default(120)
+  active       Boolean @default(true)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@index([tenantId])
+}
+
+model PriceZone {
+  id           String   @id @default(cuid())
+  tenantId     String
+  name         String   // "Hauptzeit", "Nebenzeit"
+  color        String   @default("#888888")
+  defaultPrice Int      @default(0) // Euro-Cent
+
+  tenant Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tiers  PriceTier[]
+
+  @@index([tenantId])
+}
+
+model PriceTier {
+  id              String  @id @default(cuid())
+  zoneId          String
+  courtId         String?
+  dayOfWeekMask   Int     @default(127) // Bitmask Mo=1, Di=2, Mi=4, ...
+  hourFrom        Int     @default(0)
+  hourTo          Int     @default(24)
+  price           Int     // Euro-Cent
+  eligibleGroupsJson String @default("[]")
+
+  zone  PriceZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  court Court?    @relation(fields: [courtId], references: [id], onDelete: Cascade)
+
+  @@index([zoneId])
+}
+
+model Subscription {
+  id          String   @id @default(cuid())
+  tenantId    String
+  memberId    String
+  courtId     String
+  weekday     Int      // 0=Sonntag, 1=Montag...
+  hourFrom    Int      // 0-23
+  hourTo      Int      // 0-23
+  validFrom   DateTime
+  validUntil  DateTime
+  pricePaid   Int      // Euro-Cent
+  paid        Boolean  @default(false)
+  active      Boolean  @default(true)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member   Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  court    Court    @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  bookings Booking[] @relation("SubscriptionBooking")
+
+  @@index([tenantId])
+  @@index([memberId])
+  @@index([courtId, weekday, hourFrom])
+}
+
+model WaitlistEntry {
+  id        String   @id @default(cuid())
+  tenantId  String
+  memberId  String
+  courtId   String?
+  startsAt  DateTime
+  endsAt    DateTime
+  position  Int      @default(0)
+  notified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, startsAt])
+}
+
+// =============================================================================
+// SPIELPARTNER-SUCHE
+// =============================================================================
+
+model MatchRequest {
+  id           String    @id @default(cuid())
+  tenantId     String
+  memberId     String
+  bookingId    String?
+  dateFrom     DateTime
+  dateUntil    DateTime
+  skillMin     Int       @default(0)
+  skillMax     Int       @default(3000)
+  matchType    String    @default("singles") // singles|doubles|mixed
+  status       String    @default("open") // open|matched|cancelled|expired
+  createdAt    DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@index([memberId])
+}
+
+// =============================================================================
+// CMS — OEFFENTLICHKEITSARBEIT
+// =============================================================================
+
+model Page {
+  id         String    @id @default(cuid())
+  tenantId   String
+  slug       String
+  title      String
+  contentMd  String
+  locale     String    @default("de")
+  publishedAt DateTime?
+  seoTitle   String?
+  seoDescription String?
+  ogImage    String?
+  updatedAt  DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@unique([tenantId, slug, locale])
+  @@index([tenantId])
+}
+
+model News {
+  id          String    @id @default(cuid())
+  tenantId    String
+  title       String
+  body        String
+  imageUrl    String?
+  publishedAt DateTime  @default(now())
+  authorId    String?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@index([tenantId, publishedAt])
+}
+
+model Newsletter {
+  id           String    @id @default(cuid())
+  tenantId     String
+  subject      String
+  bodyMd       String
+  channel      String    @default("email") // email|sms
+  scheduledFor DateTime?
+  sentAt       DateTime?
+  recipientCount Int     @default(0)
+  openCount    Int       @default(0)
+  clickCount   Int       @default(0)
+  audienceJson String    @default("{}") // { groups: [...] }
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@index([tenantId])
+}
+
+model Sponsor {
+  id        String    @id @default(cuid())
+  tenantId  String
+  name      String
+  logoUrl   String?
+  link      String?
+  validFrom DateTime  @default(now())
+  validUntil DateTime?
+  clicks    Int       @default(0)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@index([tenantId])
+}
+
+model WorkAssignment {
+  id            String    @id @default(cuid())
+  tenantId      String
+  memberId      String
+  hoursAssigned Float
+  hoursWorked   Float     @default(0)
+  dueDate       DateTime?
+  description   String?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  @@index([tenantId])
+}
+
+// =============================================================================
+// BUCHHALTUNG
+// =============================================================================
+
+model Account {
+  id        String  @id @default(cuid())
+  tenantId  String
+  code      String  // SKR03/SKR04 oder eigener
+  name      String
+  type      String  // revenue|expense|asset|liability|equity
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entries LedgerEntry[]
+
+  @@unique([tenantId, code])
+}
+
+model Invoice {
+  id            String    @id @default(cuid())
+  tenantId      String
+  number        String    // "RE-2026-0001"
+  recipientId   String?
+  recipientName String
+  recipientEmail String?
+  recipientAddress String?
+  itemsJson     String    @default("[]") // [{ description, qty, unitPrice, vatRate }]
+  netTotal      Int       // Euro-Cent
+  vatTotal      Int       // Euro-Cent
+  grossTotal    Int       // Euro-Cent
+  paid          Boolean   @default(false)
+  dueDate       DateTime
+  issuedAt      DateTime  @default(now())
+  paidAt        DateTime?
+  cancelledAt   DateTime?
+  cancelReplacementId String?  // Storno-Rechnung
+  pdfUrl        String?
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  recipient   Member?  @relation(fields: [recipientId], references: [id], onDelete: SetNull)
+  ledgerEntries LedgerEntry[]
+  payments    Payment[]
+  membershipPurchases MembershipPurchase[]
+
+  @@unique([tenantId, number])
+  @@index([tenantId])
+}
+
+model LedgerEntry {
+  id          String    @id @default(cuid())
+  tenantId    String
+  date        DateTime
+  accountId   String
+  debit       Int       @default(0)  // Euro-Cent
+  credit      Int       @default(0)
+  description String
+  invoiceId   String?
+  createdAt   DateTime  @default(now())
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  account Account  @relation(fields: [accountId], references: [id])
+  invoice Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, date])
+}
+
+// =============================================================================
+// ZAHLUNGEN
+// =============================================================================
+
+model Payment {
+  id           String    @id @default(cuid())
+  tenantId     String
+  memberId     String?
+  amount       Int       // Euro-Cent
+  currency     String    @default("EUR")
+  provider     String    // stripe|paypal|sepa|wallet|cash|bank
+  status       String    @default("pending") // pending|succeeded|failed|refunded
+  externalRef  String?   // z.B. Stripe-PaymentIntent-ID
+  bookingId    String?   @unique
+  invoiceId    String?
+  createdAt    DateTime  @default(now())
+  succeededAt  DateTime?
+  refundedAt   DateTime?
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member  Member?  @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  invoice Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([externalRef])
+}
+
+model Wallet {
+  id       String  @id @default(cuid())
+  memberId String  @unique
+  balance  Int     @default(0) // Euro-Cent
+
+  member       Member              @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+}
+
+model WalletTransaction {
+  id        String   @id @default(cuid())
+  walletId  String
+  amount    Int      // Euro-Cent (signed)
+  reason    String   // "topup"|"booking"|"refund"|"adjust"
+  refType   String?  // "booking"|"course"|...
+  refId     String?
+  createdAt DateTime @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  @@index([walletId])
+}
+
+// =============================================================================
+// FORDERUNGSPYRAMIDE / RANGLISTEN
+// =============================================================================
+
+model Ladder {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String   // "Herren Einzel 2026"
+  format      String   @default("pyramid") // pyramid|points|roundrobin
+  matchType   String   @default("singles") // singles|doubles|mixed
+  category    String   @default("open") // open|men|women|youth|seniors|guests
+  seasonStart DateTime
+  seasonEnd   DateTime
+  acceptDays  Int      @default(7) // Annahmefrist nach Forderung
+  cooldownDays Int     @default(7) // nach gespieltem Match
+  active      Boolean  @default(true)
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  participants LadderParticipant[]
+  challenges   Challenge[]
+
+  @@index([tenantId])
+}
+
+model LadderParticipant {
+  id              String  @id @default(cuid())
+  ladderId        String
+  memberId        String
+  position        Int     @default(0) // 1 = oberste Stelle
+  points          Int     @default(0)
+  matchesPlayed   Int     @default(0)
+  matchesWon      Int     @default(0)
+  joinedAt        DateTime @default(now())
+
+  ladder Ladder @relation(fields: [ladderId], references: [id], onDelete: Cascade)
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([ladderId, memberId])
+  @@index([ladderId, position])
+}
+
+model Challenge {
+  id            String    @id @default(cuid())
+  ladderId      String
+  challengerId  String
+  challengedId  String
+  status        String    @default("pending") // pending|accepted|declined|played|expired
+  proposedAt    DateTime  @default(now())
+  acceptedAt    DateTime?
+  deadline      DateTime  // bis wann muss gespielt werden
+  setsJson      String?   // JSON: [[6,4],[3,6],[7,5]]
+  winnerId      String?
+  validatedAt   DateTime?
+
+  ladder      Ladder @relation(fields: [ladderId], references: [id], onDelete: Cascade)
+  challenger  Member @relation("Challenger", fields: [challengerId], references: [id])
+  challenged  Member @relation("Challenged", fields: [challengedId], references: [id])
+
+  @@index([ladderId, status])
+}
+
+// =============================================================================
+// TURNIERE
+// =============================================================================
+
+model Tournament {
+  id              String    @id @default(cuid())
+  tenantId        String
+  name            String
+  format          String    @default("ko") // ko|double_ko|roundrobin|swiss|pyramid
+  matchType       String    @default("singles") // singles|doubles|mixed
+  drawSize        Int       @default(16)
+  registrationOpen DateTime
+  registrationClose DateTime
+  startsAt        DateTime
+  endsAt          DateTime
+  entryFee        Int       @default(0) // Euro-Cent
+  status          String    @default("draft") // draft|registration|seeded|running|finished
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entries  TournamentEntry[]
+  matches  TournamentMatch[]
+
+  @@index([tenantId])
+}
+
+model TournamentEntry {
+  id           String  @id @default(cuid())
+  tournamentId String
+  memberId     String?
+  guestName    String?
+  partnerId    String? // fuer Doppel
+  paid         Boolean @default(false)
+  seed         Int?
+  withdrawn    Boolean @default(false)
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  member     Member?    @relation(fields: [memberId], references: [id], onDelete: SetNull)
+
+  @@index([tournamentId])
+}
+
+model TournamentMatch {
+  id            String    @id @default(cuid())
+  tournamentId  String
+  round         Int       // 1=erste Runde
+  slot          Int       // Position im Bracket
+  bracket       String    @default("main") // main|losers|playoff
+  playerAEntryId String?
+  playerBEntryId String?
+  courtId       String?
+  scheduledAt   DateTime?
+  setsJson      String?   // [[6,3],[6,4]]
+  winnerEntryId String?
+  walkover      Boolean   @default(false)
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  court      Court?     @relation(fields: [courtId], references: [id], onDelete: SetNull)
+
+  @@index([tournamentId, round])
+}
+
+// =============================================================================
+// MANNSCHAFTSVERWALTUNG
+// =============================================================================
+
+model Team {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String   // "Herren 1"
+  league    String?  // "Landesliga A"
+  division  String?
+  captainId String?
+  active    Boolean  @default(true)
+
+  tenant  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  members TeamMember[]
+  matches LeagueMatch[]
+
+  @@index([tenantId])
+}
+
+model TeamMember {
+  id       String @id @default(cuid())
+  teamId   String
+  memberId String
+  position Int    @default(0)
+  isCaptain Boolean @default(false)
+
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, memberId])
+}
+
+model LeagueMatch {
+  id         String   @id @default(cuid())
+  tenantId   String
+  teamId     String
+  opponent   String
+  isHome     Boolean
+  date       DateTime
+  courtId    String?
+  lineupJson String   @default("[]") // [{ memberId, position, status }]
+  scoreJson  String?  // [[6,3],...]
+  result     String?  // "win"|"loss"|"draw"|null
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  court  Court? @relation(fields: [courtId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, date])
+}
+
+// =============================================================================
+// KURSE / CAMPS / EVENTS
+// =============================================================================
+
+model Course {
+  id              String    @id @default(cuid())
+  tenantId        String
+  name            String
+  type            String    @default("course") // course|camp|event
+  description     String?
+  startsAt        DateTime
+  endsAt          DateTime
+  capacity        Int       @default(20)
+  minParticipants Int       @default(0)
+  price           Int       @default(0) // Euro-Cent
+  visibilityGroupsJson String @default("[]")
+  registrationOpen DateTime?
+  registrationClose DateTime?
+  status          String    @default("draft") // draft|published|cancelled|finished
+
+  tenant        Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessions      CourseSession[]
+  registrations CourseRegistration[]
+
+  @@index([tenantId])
+}
+
+model CourseSession {
+  id        String   @id @default(cuid())
+  courseId  String
+  startsAt  DateTime
+  endsAt    DateTime
+  courtId   String?
+  trainerId String?
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  court  Court? @relation(fields: [courtId], references: [id], onDelete: SetNull)
+
+  @@index([courseId])
+}
+
+model CourseRegistration {
+  id           String   @id @default(cuid())
+  courseId     String
+  memberId     String?
+  guestName    String?
+  guestEmail   String?
+  paid         Boolean  @default(false)
+  attendedSessions String @default("[]") // JSON-Array von SessionIds
+  waitlist     Boolean  @default(false)
+  registeredAt DateTime @default(now())
+
+  course Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  member Member? @relation(fields: [memberId], references: [id], onDelete: SetNull)
+
+  @@index([courseId])
+}
+
+// =============================================================================
+// KIOSK / POS
+// =============================================================================
+
+model Product {
+  id          String  @id @default(cuid())
+  tenantId    String
+  sku         String?
+  name        String
+  category    String?
+  price       Int     // Euro-Cent
+  cost        Int     @default(0) // Einkaufspreis
+  stock       Int     @default(0)
+  minStock    Int     @default(0) // Reorder-Trigger
+  vatRate     Int     @default(2000) // 20% = 2000 (basis points)
+  active      Boolean @default(true)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  @@index([tenantId])
+}
+
+model RegisterSession {
+  id            String    @id @default(cuid())
+  tenantId      String
+  openedById    String?
+  openingBalance Int      @default(0)
+  closingBalance Int?
+  openedAt      DateTime  @default(now())
+  closedAt      DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sales  Sale[]
+}
+
+model Sale {
+  id              String    @id @default(cuid())
+  tenantId        String
+  memberId        String?
+  itemsJson       String    // [{ productId, qty, price }]
+  netTotal        Int
+  vatTotal        Int
+  grossTotal      Int
+  paymentMethod   String    // cash|card|invoice|sepa|wallet
+  registerSessionId String?
+  fiscalReceiptId String?   // Hello Cash / RKSV-ID
+  createdAt       DateTime  @default(now())
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member   Member?           @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  session  RegisterSession?  @relation(fields: [registerSessionId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+}
+
+// =============================================================================
+// HARDWARE / ZUTRITT / STEUERUNG
+// =============================================================================
+
+model Device {
+  id        String  @id @default(cuid())
+  tenantId  String
+  kind      String  // relay|mqtt|exivo|comydo|salto|tedee|nuki
+  name      String
+  endpoint  String? // URL/IP
+  credentialsEnc String? // verschluesselte Auth-Daten
+  active    Boolean @default(true)
+
+  tenant   Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  mappings DeviceMapping[]
+  logs     DeviceLog[]
+  grants   AccessGrant[]
+
+  @@index([tenantId])
+}
+
+model DeviceMapping {
+  id       String  @id @default(cuid())
+  deviceId String
+  courtId  String?
+  channel  Int     @default(0) // Relais-Kanal 0-7
+  action   String  // light|heat|door
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  court  Court? @relation(fields: [courtId], references: [id], onDelete: SetNull)
+}
+
+model DeviceLog {
+  id        String   @id @default(cuid())
+  deviceId  String
+  action    String
+  status    String   // ok|error|timeout
+  message   String?
+  createdAt DateTime @default(now())
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  @@index([deviceId, createdAt])
+}
+
+model AccessGrant {
+  id         String   @id @default(cuid())
+  bookingId  String   @unique
+  deviceId   String
+  pinCode    String
+  validFrom  DateTime
+  validUntil DateTime
+  usedAt     DateTime?
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  device  Device  @relation(fields: [deviceId], references: [id])
+}
+
+// =============================================================================
+// NOTIFICATIONS
+// =============================================================================
+
+// Open-Play-Sessions: Mitglieder erstellen offene Spiele und andere joinen
+// (Hauptdifferentiator zu eTennis, kopiert von Playtomic)
+model OpenSession {
+  id           String    @id @default(cuid())
+  tenantId     String
+  hostId       String
+  courtId      String?
+  bookingId    String?   @unique // optional verkn&uuml;pfte Buchung
+  startsAt     DateTime
+  endsAt       DateTime
+  format       String    @default("doubles") // singles|doubles|mixed|practice
+  skillMin     Float     @default(0)
+  skillMax     Float     @default(7)
+  maxPlayers   Int       @default(4)
+  description  String?
+  status       String    @default("open") // open|full|started|cancelled|finished
+  createdAt    DateTime  @default(now())
+
+  tenant       Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  host         Member                  @relation("OpenSessionHost", fields: [hostId], references: [id], onDelete: Cascade)
+  court        Court?                  @relation(fields: [courtId], references: [id], onDelete: SetNull)
+  participants OpenSessionParticipant[]
+
+  @@index([tenantId, status])
+  @@index([startsAt])
+}
+
+model OpenSessionParticipant {
+  id        String   @id @default(cuid())
+  sessionId String
+  memberId  String
+  joinedAt  DateTime @default(now())
+
+  session OpenSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  member  Member      @relation("OpenSessionParticipant", fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, memberId])
+  @@index([memberId])
+}
+
+model Notification {
+  id           String    @id @default(cuid())
+  tenantId     String
+  memberId     String?
+  channel      String    // email|sms|push|inapp
+  template     String    // booking_confirmed|challenge_received|...
+  subject      String?
+  body         String
+  scheduledFor DateTime?
+  sentAt       DateTime?
+  readAt       DateTime?
+  status       String    @default("queued") // queued|sent|failed|read
+  errorMessage String?
+  metaJson     String    @default("{}")
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  member Member? @relation(fields: [memberId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status])
+  @@index([memberId, sentAt])
+}
