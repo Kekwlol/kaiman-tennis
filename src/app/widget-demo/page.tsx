@@ -2,6 +2,8 @@ import { db } from "@/lib/db";
 import Script from "next/script";
 import Link from "next/link";
 
+export const dynamic = "force-dynamic";
+
 export default async function WidgetDemo() {
   const tenant = await db.tenant.findFirst({ where: { slug: "greinsfurth" } });
 
