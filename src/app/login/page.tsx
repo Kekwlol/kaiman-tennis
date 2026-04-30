@@ -25,7 +25,8 @@ async function loginPassword(formData: FormData) {
   });
   if (!parsed.success) redirect("/login?error=invalid");
 
-  const slug = h.get("x-tenant-slug");
+  // Tenant aus Header (Subdomain in Production) oder aus FormData-Hidden-Field (Demo-Override)
+  const slug = h.get("x-tenant-slug") || String(formData.get("_tenant") ?? "");
   const tenant = slug ? await db.tenant.findUnique({ where: { slug } }) : null;
   if (!tenant) redirect("/login?error=no-tenant");
 
@@ -50,7 +51,8 @@ async function requestMagicLink(formData: FormData) {
   if (!rateLimit(`magic:${ip}`, 5, 15 * 60_000)) redirect("/login?error=ratelimit");
 
   const parsed = MagicSchema.parse({ email: formData.get("email") });
-  const slug = h.get("x-tenant-slug");
+  // Tenant aus Header (Subdomain in Production) oder aus FormData-Hidden-Field (Demo-Override)
+  const slug = h.get("x-tenant-slug") || String(formData.get("_tenant") ?? "");
   const tenant = slug ? await db.tenant.findUnique({ where: { slug } }) : null;
   if (!tenant) redirect("/login?sent=1");
 
@@ -85,11 +87,15 @@ const ERROR_MSG: Record<string, string> = {
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ sent?: string; next?: string; error?: string }>;
+  searchParams: Promise<{ sent?: string; next?: string; error?: string; _tenant?: string }>;
 }) {
   const sp = await searchParams;
   const auth = await getAuth();
   if (auth) redirect(sp.next ?? "/admin");
+
+  // Tenant aus Header oder Override-Param (Demo)
+  const h = await import("next/headers").then((m) => m.headers());
+  const tenantSlug = (await h).get("x-tenant-slug") || sp._tenant || "";
 
   return (
     <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4">
@@ -111,6 +117,7 @@ export default async function LoginPage({
         )}
 
         <form action={loginPassword} className="space-y-3 mb-6">
+          {tenantSlug && <input type="hidden" name="_tenant" value={tenantSlug} />}
           <h2 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-2">
             Admin-Login
           </h2>
@@ -140,6 +147,7 @@ export default async function LoginPage({
 
         <div className="border-t border-stone-200 pt-6">
           <form action={requestMagicLink} className="space-y-3">
+            {tenantSlug && <input type="hidden" name="_tenant" value={tenantSlug} />}
             <h2 className="text-xs font-medium text-stone-500 uppercase tracking-wider mb-2">
               Mitglieder-Login (Magic-Link)
             </h2>
