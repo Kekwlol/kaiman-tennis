@@ -28,6 +28,20 @@ model Tenant {
   currency     String   @default("EUR")
   vatNumber    String?
   iban         String?
+  // Geografie + Oeffnungszeiten
+  latitude     Float?
+  longitude    Float?
+  addressLine  String?
+  postalCode   String?
+  city         String?
+  country      String   @default("AT")
+  openHour     Int      @default(8)
+  closeHour    Int      @default(22)
+  // Billing
+  plan                  String    @default("trial")
+  trialEndsAt           DateTime?
+  stripeCustomerId      String?
+  stripeSubscriptionId  String?
   createdAt    DateTime @default(now())
 
   courts            Court[]

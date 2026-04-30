@@ -1,29 +1,46 @@
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
-import { requireCurrentTenant } from "@/lib/tenant-context";
 import { PageHeader, FormField, Btn, inputCls } from "@/components/admin-ui";
+import { authedAdmin, logMutation } from "@/lib/server-action";
+import { z } from "zod";
+
+const Schema = z.object({
+  name: z.string().min(1).max(120),
+  email: z.string().email(),
+  phone: z.string().max(40).optional(),
+  group: z.enum(["child", "youth", "adult", "senior", "family", "guest"]),
+});
 
 async function createMember(formData: FormData) {
   "use server";
-  const headers = await import("next/headers").then((m) => m.headers());
-  const slug = (await headers).get("x-tenant-slug");
-  const t = await db.tenant.findUnique({ where: { slug: slug ?? "" } });
-  if (!t) throw new Error("NO_TENANT");
+  const ctx = await authedAdmin();
+  const parsed = Schema.parse({
+    name: formData.get("name"),
+    email: formData.get("email"),
+    phone: formData.get("phone") ?? "",
+    group: formData.get("group"),
+  });
+  // Doppel-Check: Email darf in diesem Tenant nicht doppelt
+  const existing = await db.member.findUnique({
+    where: { tenantId_email: { tenantId: ctx.tenant.id, email: parsed.email } },
+  });
+  if (existing) throw new Error("EMAIL_ALREADY_EXISTS");
 
-  await db.member.create({
+  const member = await db.member.create({
     data: {
-      tenantId: t.id,
-      email: String(formData.get("email")),
-      name: String(formData.get("name")),
-      phone: String(formData.get("phone") ?? "") || null,
-      group: String(formData.get("group") ?? "adult"),
+      tenantId: ctx.tenant.id,
+      email: parsed.email,
+      name: parsed.name,
+      phone: parsed.phone || null,
+      group: parsed.group,
     },
   });
+  await logMutation(ctx, "Member", member.id, "create", null, parsed);
   redirect("/admin/members");
 }
 
 export default async function NewMember() {
-  await requireCurrentTenant();
+  await authedAdmin();
   return (
     <div>
       <PageHeader title="Neues Mitglied" />

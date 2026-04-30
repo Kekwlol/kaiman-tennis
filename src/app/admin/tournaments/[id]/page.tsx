@@ -1,35 +1,64 @@
 import { db } from "@/lib/db";
-import { requireCurrentTenant } from "@/lib/tenant-context";
 import { PageHeader, Btn, Card, Table, Th, Td, FormField, inputCls } from "@/components/admin-ui";
 import { redirect, notFound } from "next/navigation";
 import { generateBracket, reportMatch } from "@/lib/tournament";
+import { authedAdmin, logMutation } from "@/lib/server-action";
 
 async function regEntry(formData: FormData) {
   "use server";
+  const ctx = await authedAdmin();
   const tournamentId = String(formData.get("tournamentId"));
-  await db.tournamentEntry.create({
-    data: {
-      tournamentId,
-      memberId: String(formData.get("memberId")) || null,
-      seed: numOrNull(formData.get("seed")),
-    },
+  // Tenant-Match: Tournament muss zum Tenant gehoeren
+  const tournament = await db.tournament.findFirst({
+    where: { id: tournamentId, tenantId: ctx.tenant.id },
   });
+  if (!tournament) throw new Error("TOURNAMENT_NOT_FOUND_OR_FORBIDDEN");
+
+  const memberId = String(formData.get("memberId")) || null;
+  if (memberId) {
+    const member = await db.member.findFirst({
+      where: { id: memberId, tenantId: ctx.tenant.id },
+    });
+    if (!member) throw new Error("MEMBER_NOT_FOUND_OR_FORBIDDEN");
+  }
+  const created = await db.tournamentEntry.create({
+    data: { tournamentId, memberId, seed: numOrNull(formData.get("seed")) },
+  });
+  await logMutation(ctx, "TournamentEntry", created.id, "create");
   redirect(`/admin/tournaments/${tournamentId}`);
 }
 
 async function buildBracket(formData: FormData) {
   "use server";
+  const ctx = await authedAdmin();
   const id = String(formData.get("tournamentId"));
+  const tournament = await db.tournament.findFirst({
+    where: { id, tenantId: ctx.tenant.id },
+  });
+  if (!tournament) throw new Error("TOURNAMENT_NOT_FOUND_OR_FORBIDDEN");
   await generateBracket(id);
+  await logMutation(ctx, "Tournament", id, "update", null, { bracketGenerated: true });
   redirect(`/admin/tournaments/${id}`);
 }
 
 async function record(formData: FormData) {
   "use server";
+  const ctx = await authedAdmin();
   const matchId = String(formData.get("matchId"));
-  const sets = String(formData.get("sets")).split(",").map((s) => s.split(":").map(Number));
-  await reportMatch({ matchId, sets });
   const tournamentId = String(formData.get("tournamentId"));
+  // Tenant-Match: Match via Tournament zum Tenant
+  const match = await db.tournamentMatch.findFirst({
+    where: { id: matchId, tournament: { tenantId: ctx.tenant.id } },
+  });
+  if (!match) throw new Error("MATCH_NOT_FOUND_OR_FORBIDDEN");
+
+  const sets = String(formData.get("sets")).split(",").map((s) => s.split(":").map(Number));
+  for (const [a, b] of sets) {
+    if (isNaN(a) || isNaN(b) || a < 0 || b < 0 || a > 99 || b > 99)
+      throw new Error("INVALID_SCORE");
+  }
+  await reportMatch({ matchId, sets });
+  await logMutation(ctx, "TournamentMatch", matchId, "update", null, { sets });
   redirect(`/admin/tournaments/${tournamentId}`);
 }
 
@@ -41,7 +70,8 @@ function numOrNull(v: FormDataEntryValue | null) {
 
 export default async function TournamentDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const tenant = await requireCurrentTenant();
+  const ctx = await authedAdmin();
+  const tenant = ctx.tenant;
   const t = await db.tournament.findFirst({
     where: { id, tenantId: tenant.id },
     include: {

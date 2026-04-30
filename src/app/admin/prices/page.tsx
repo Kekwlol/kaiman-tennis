@@ -1,15 +1,14 @@
 import { db } from "@/lib/db";
 import { requireCurrentTenant } from "@/lib/tenant-context";
 import { PageHeader, Btn, Table, Th, Td, FormField, inputCls, Card } from "@/components/admin-ui";
+import { authedAdmin } from "@/lib/server-action";
 import { redirect } from "next/navigation";
 import { fmtMoney, parseMoney } from "@/lib/money";
 
 async function createZone(formData: FormData) {
   "use server";
-  const h = await import("next/headers").then((m) => m.headers());
-  const slug = (await h).get("x-tenant-slug");
-  const t = await db.tenant.findUnique({ where: { slug: slug ?? "" } });
-  if (!t) throw new Error("NO_TENANT");
+  const ctx = await authedAdmin();
+  const t = ctx.tenant;
   await db.priceZone.create({
     data: {
       tenantId: t.id,
@@ -23,15 +22,26 @@ async function createZone(formData: FormData) {
 
 async function createTier(formData: FormData) {
   "use server";
+  const ctx = await authedAdmin();
+  const zoneId = String(formData.get("zoneId"));
+  // Zone muss zum Tenant gehoeren
+  const zone = await db.priceZone.findFirst({ where: { id: zoneId, tenantId: ctx.tenant.id } });
+  if (!zone) throw new Error("ZONE_NOT_FOUND_OR_FORBIDDEN");
+
+  const hourFrom = parseInt(String(formData.get("hourFrom")));
+  const hourTo = parseInt(String(formData.get("hourTo")));
+  if (isNaN(hourFrom) || isNaN(hourTo) || hourFrom < 0 || hourTo > 24 || hourFrom >= hourTo)
+    throw new Error("INVALID_HOURS");
+
   await db.priceTier.create({
     data: {
-      zoneId: String(formData.get("zoneId")),
-      hourFrom: parseInt(String(formData.get("hourFrom"))),
-      hourTo: parseInt(String(formData.get("hourTo"))),
+      zoneId,
+      hourFrom,
+      hourTo,
       price: parseMoney(String(formData.get("price"))),
       dayOfWeekMask: parseInt(String(formData.get("dayOfWeekMask") ?? "127")),
       eligibleGroupsJson: JSON.stringify(
-        String(formData.get("groups") ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+        String(formData.get("groups") ?? "").split(",").map((s) => s.trim()).filter(Boolean),
       ),
     },
   });

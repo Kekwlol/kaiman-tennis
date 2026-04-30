@@ -1,37 +1,60 @@
 import { db } from "@/lib/db";
-import { requireCurrentTenant } from "@/lib/tenant-context";
 import { PageHeader, Btn, Table, Th, Td, FormField, inputCls, Card } from "@/components/admin-ui";
 import { redirect, notFound } from "next/navigation";
 import { reportResult } from "@/lib/ladder";
+import { authedAdmin, logMutation } from "@/lib/server-action";
 
 async function addParticipant(formData: FormData) {
   "use server";
+  const ctx = await authedAdmin();
   const ladderId = String(formData.get("ladderId"));
   const memberId = String(formData.get("memberId"));
+  // Tenant-Match: Ladder + Member muessen zum gleichen Tenant
+  const ladder = await db.ladder.findFirst({ where: { id: ladderId, tenantId: ctx.tenant.id } });
+  if (!ladder) throw new Error("LADDER_NOT_FOUND_OR_FORBIDDEN");
+  const member = await db.member.findFirst({ where: { id: memberId, tenantId: ctx.tenant.id } });
+  if (!member) throw new Error("MEMBER_NOT_FOUND_OR_FORBIDDEN");
+
   const last = await db.ladderParticipant.findFirst({
     where: { ladderId }, orderBy: { position: "desc" },
   });
-  await db.ladderParticipant.create({
+  const created = await db.ladderParticipant.create({
     data: { ladderId, memberId, position: (last?.position ?? 0) + 1 },
   });
+  await logMutation(ctx, "LadderParticipant", created.id, "create", null, { ladderId, memberId });
   redirect(`/admin/ladders/${ladderId}`);
 }
 
 async function recordResult(formData: FormData) {
   "use server";
+  const ctx = await authedAdmin();
   const challengeId = String(formData.get("challengeId"));
-  const setsRaw = String(formData.get("sets")); // "6:4,3:6,7:5"
-  const sets = setsRaw.split(",").map((s) => s.split(":").map(Number));
-  await reportResult({ challengeId, sets });
   const ladderId = String(formData.get("ladderId"));
+
+  // Tenant-Match: Challenge muss zum Tenant gehoeren via Ladder
+  const challenge = await db.challenge.findFirst({
+    where: { id: challengeId, ladder: { tenantId: ctx.tenant.id } },
+  });
+  if (!challenge) throw new Error("CHALLENGE_NOT_FOUND_OR_FORBIDDEN");
+
+  const setsRaw = String(formData.get("sets"));
+  const sets = setsRaw.split(",").map((s) => s.split(":").map(Number));
+  // Validierung: Sets muessen gueltige Tennis-Scores sein
+  for (const [a, b] of sets) {
+    if (isNaN(a) || isNaN(b) || a < 0 || b < 0 || a > 99 || b > 99) {
+      throw new Error("INVALID_SCORE");
+    }
+  }
+  await reportResult({ challengeId, sets });
+  await logMutation(ctx, "Challenge", challengeId, "update", null, { sets });
   redirect(`/admin/ladders/${ladderId}`);
 }
 
 export default async function LadderDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const tenant = await requireCurrentTenant();
+  const ctx = await authedAdmin();
   const ladder = await db.ladder.findFirst({
-    where: { id, tenantId: tenant.id },
+    where: { id, tenantId: ctx.tenant.id },
     include: {
       participants: { include: { member: true }, orderBy: [{ position: "asc" }, { points: "desc" }] },
       challenges: {
@@ -44,7 +67,7 @@ export default async function LadderDetail({ params }: { params: Promise<{ id: s
 
   const memberPool = await db.member.findMany({
     where: {
-      tenantId: tenant.id,
+      tenantId: ctx.tenant.id,
       status: "active",
       NOT: { ladderEntries: { some: { ladderId: ladder.id } } },
     },

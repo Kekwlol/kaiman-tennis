@@ -1,16 +1,15 @@
 import { db } from "@/lib/db";
 import { requireCurrentTenant } from "@/lib/tenant-context";
 import { PageHeader, Btn, Table, Th, Td, FormField, inputCls } from "@/components/admin-ui";
+import { authedAdmin } from "@/lib/server-action";
 import { redirect } from "next/navigation";
 import { fmtMoney, parseMoney } from "@/lib/money";
 import { createInvoice, recordPayment } from "@/lib/accounting";
 
 async function createInv(formData: FormData) {
   "use server";
-  const h = await import("next/headers").then((m) => m.headers());
-  const slug = (await h).get("x-tenant-slug");
-  const t = await db.tenant.findUnique({ where: { slug: slug ?? "" } });
-  if (!t) throw new Error("NO_TENANT");
+  const ctx = await authedAdmin();
+  const t = ctx.tenant;
   await createInvoice({
     tenantId: t.id,
     recipientName: String(formData.get("recipientName")),
@@ -30,10 +29,8 @@ async function createInv(formData: FormData) {
 
 async function pay(formData: FormData) {
   "use server";
-  const h = await import("next/headers").then((m) => m.headers());
-  const slug = (await h).get("x-tenant-slug");
-  const t = await db.tenant.findUnique({ where: { slug: slug ?? "" } });
-  if (!t) throw new Error("NO_TENANT");
+  const ctx = await authedAdmin();
+  const t = ctx.tenant;
   await recordPayment({
     tenantId: t.id,
     invoiceId: String(formData.get("id")),
