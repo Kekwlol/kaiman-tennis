@@ -1,9 +1,10 @@
 import { db } from "./db";
 import { validateBooking } from "./booking-rules";
-import { calculatePrice, loadZones, priceFromZones } from "./pricing";
+import { loadZones, priceFromZones } from "./pricing";
 import { notify } from "./notifications";
 import { executeDevice } from "./devices";
 import { fetchHourlyForecast, weatherEmoji } from "./weather";
+import { randomInt } from "node:crypto";
 
 export type Slot = {
   courtId: string;
@@ -29,7 +30,6 @@ export async function getAvailability(
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
 
-  // Alle Daten parallel laden (statt N+1 calculatePrice-Calls)
   const [courts, bookings, zones] = await Promise.all([
     db.court.findMany({ where: { tenantId, active: true }, orderBy: { order: "asc" } }),
     db.booking.findMany({
@@ -86,6 +86,11 @@ export async function getAvailability(
   return slots;
 }
 
+// Sicherer 6-stelliger PIN via crypto.randomInt (statt Math.random)
+function generatePin(): string {
+  return randomInt(100000, 1_000_000).toString();
+}
+
 export async function createBooking(input: {
   tenantId: string;
   courtId: string;
@@ -95,9 +100,17 @@ export async function createBooking(input: {
   end: Date;
   source: "web" | "widget" | "admin" | "subscription";
 }) {
-  // 1. Regel-Prüfung wenn Member
+  // Court muss zum Tenant gehoeren (verhindert Cross-Tenant-Booking)
+  const court = await db.court.findFirst({
+    where: { id: input.courtId, tenantId: input.tenantId },
+  });
+  if (!court) throw new Error("COURT_NOT_FOUND");
+
+  // Member muss zum Tenant gehoeren
   if (input.memberId) {
-    const member = await db.member.findUnique({ where: { id: input.memberId } });
+    const member = await db.member.findFirst({
+      where: { id: input.memberId, tenantId: input.tenantId },
+    });
     if (!member) throw new Error("MEMBER_NOT_FOUND");
     if (input.source !== "admin") {
       const validation = await validateBooking({
@@ -111,70 +124,75 @@ export async function createBooking(input: {
     }
   }
 
-  // 2. Konflikt-Prüfung (atomare Transaktion)
-  const conflict = await db.booking.findFirst({
-    where: {
-      courtId: input.courtId,
-      status: "confirmed",
-      AND: [{ startsAt: { lt: input.end } }, { endsAt: { gt: input.start } }],
-    },
-  });
-  if (conflict) throw new Error("SLOT_TAKEN");
-
-  // 3. Preis berechnen
+  // Preis berechnen (vor Transaction um Latency zu reduzieren)
   const member = input.memberId
     ? await db.member.findUnique({ where: { id: input.memberId } })
     : null;
-  const priceCents = await calculatePrice({
-    tenantId: input.tenantId,
+  const zones = await loadZones(input.tenantId);
+  const priceCents = priceFromZones(zones, {
     courtId: input.courtId,
     startsAt: input.start,
-    endsAt: input.end,
     memberGroup: member?.group ?? "guest",
   });
 
-  // 4. Booking + AccessGrant gemeinsam erstellen
-  const pinCode = Math.floor(1000 + Math.random() * 9000).toString();
-  const booking = await db.booking.create({
-    data: {
-      tenantId: input.tenantId,
-      courtId: input.courtId,
-      memberId: input.memberId ?? null,
-      guestName: input.guestName ?? null,
-      startsAt: input.start,
-      endsAt: input.end,
-      source: input.source,
-      pinCode,
-      pricePaid: priceCents,
-    },
-  });
+  const pinCode = generatePin();
 
-  // 5. AccessGrant für Zutritt-Devices
-  const courtMappings = await db.deviceMapping.findMany({
-    where: { courtId: input.courtId, action: "door" },
-    include: { device: true },
-  });
-  for (const m of courtMappings) {
-    await db.accessGrant.create({
-      data: {
-        bookingId: booking.id,
-        deviceId: m.deviceId,
-        pinCode,
-        validFrom: new Date(input.start.getTime() - 30 * 60 * 1000),
-        validUntil: new Date(input.end.getTime() + 30 * 60 * 1000),
+  // ATOMARE Konflikt-Pruefung + Booking-Erstellung in EINER Transaction.
+  // Verhindert Race-Condition (zwei parallele Buchungen auf gleichen Slot).
+  const booking = await db.$transaction(async (tx) => {
+    const conflict = await tx.booking.findFirst({
+      where: {
+        courtId: input.courtId,
+        status: "confirmed",
+        AND: [{ startsAt: { lt: input.end } }, { endsAt: { gt: input.start } }],
       },
     });
-    await executeDevice(m.deviceId, {
-      action: "grant",
-      pinCode,
-      validFrom: input.start,
-      validUntil: input.end,
+    if (conflict) throw new Error("SLOT_TAKEN");
+
+    return tx.booking.create({
+      data: {
+        tenantId: input.tenantId,
+        courtId: input.courtId,
+        memberId: input.memberId ?? null,
+        guestName: input.guestName ?? null,
+        startsAt: input.start,
+        endsAt: input.end,
+        source: input.source,
+        pinCode,
+        pricePaid: priceCents,
+      },
     });
+  }, { isolationLevel: "Serializable" });
+
+  // AccessGrant + Device-Trigger NACH der Transaction (best-effort, kein Booking-Rollback bei Hardware-Fehler)
+  try {
+    const courtMappings = await db.deviceMapping.findMany({
+      where: { courtId: input.courtId, action: "door" },
+    });
+    for (const m of courtMappings) {
+      await db.accessGrant.create({
+        data: {
+          bookingId: booking.id,
+          deviceId: m.deviceId,
+          pinCode,
+          validFrom: new Date(input.start.getTime() - 30 * 60 * 1000),
+          validUntil: new Date(input.end.getTime() + 30 * 60 * 1000),
+        },
+      });
+      await executeDevice(m.deviceId, {
+        action: "grant",
+        pinCode,
+        validFrom: input.start,
+        validUntil: input.end,
+      }).catch((e) => console.error("Device grant failed:", e));
+    }
+  } catch (e) {
+    console.error("AccessGrant failed (booking still created):", e);
   }
 
-  // 6. Notify
+  // Notify (best-effort)
   if (input.memberId) {
-    await notify({
+    notify({
       tenantId: input.tenantId,
       memberId: input.memberId,
       channel: "email",
@@ -182,18 +200,32 @@ export async function createBooking(input: {
       subject: "Buchungsbestätigung",
       body: `${booking.startsAt.toLocaleString("de-AT")} | PIN: ${pinCode}`,
       meta: { bookingId: booking.id },
-    });
+    }).catch((e) => console.error("Notify failed:", e));
   }
 
   return booking;
 }
 
-export async function cancelBooking(bookingId: string) {
-  const booking = await db.booking.update({
-    where: { id: bookingId },
+export async function cancelBooking(input: {
+  tenantId: string;
+  bookingId: string;
+  memberId?: string;
+}) {
+  // Tenant + Owner-Check (Member kann nur eigene Buchungen stornieren)
+  const booking = await db.booking.findFirst({
+    where: { id: input.bookingId, tenantId: input.tenantId },
+  });
+  if (!booking) throw new Error("NOT_FOUND");
+  if (input.memberId && booking.memberId !== input.memberId) {
+    throw new Error("CROSS_MEMBER_FORBIDDEN");
+  }
+
+  const updated = await db.booking.update({
+    where: { id: booking.id },
     data: { status: "cancelled", cancelledAt: new Date() },
   });
-  // Wartelistenprüfung
+
+  // Wartelisten-Notify (best-effort)
   const waiting = await db.waitlistEntry.findFirst({
     where: {
       tenantId: booking.tenantId,
@@ -204,18 +236,18 @@ export async function cancelBooking(bookingId: string) {
     orderBy: { position: "asc" },
   });
   if (waiting) {
-    await notify({
+    await db.waitlistEntry.update({
+      where: { id: waiting.id },
+      data: { notified: true },
+    });
+    notify({
       tenantId: booking.tenantId,
       memberId: waiting.memberId,
       channel: "email",
       template: "waitlist_slot_free",
       subject: "Platz frei geworden",
       body: `Der Slot ${booking.startsAt.toLocaleString("de-AT")} ist frei.`,
-    });
-    await db.waitlistEntry.update({
-      where: { id: waiting.id },
-      data: { notified: true },
-    });
+    }).catch((e) => console.error("Waitlist notify failed:", e));
   }
-  return booking;
+  return updated;
 }

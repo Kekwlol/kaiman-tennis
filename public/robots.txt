@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+
+# Admin und API nicht indexieren
+Disallow: /admin
+Disallow: /api
+Disallow: /login
+
+Sitemap: https://kaiman-tennis.vercel.app/sitemap.xml

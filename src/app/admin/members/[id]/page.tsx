@@ -1,37 +1,65 @@
 import { db } from "@/lib/db";
-import { requireCurrentTenant } from "@/lib/tenant-context";
 import { PageHeader, FormField, Btn, inputCls, Card } from "@/components/admin-ui";
 import { redirect, notFound } from "next/navigation";
 import { fmtMoney } from "@/lib/money";
+import { authedAdmin, logMutation } from "@/lib/server-action";
+import { z } from "zod";
+
+const MemberSchema = z.object({
+  name: z.string().min(1).max(120),
+  email: z.string().email(),
+  phone: z.string().max(40).optional(),
+  group: z.enum(["child", "youth", "adult", "senior", "family", "guest"]),
+  status: z.enum(["active", "inactive", "left"]),
+  visibility: z.enum(["public", "members", "private"]),
+});
 
 async function updateMember(formData: FormData) {
   "use server";
+  const ctx = await authedAdmin();
   const id = String(formData.get("id"));
+  const existing = await db.member.findFirst({ where: { id, tenantId: ctx.tenant.id } });
+  if (!existing) throw new Error("NOT_FOUND_OR_FORBIDDEN");
+
+  const parsed = MemberSchema.parse({
+    name: formData.get("name"),
+    email: formData.get("email"),
+    phone: formData.get("phone") ?? "",
+    group: formData.get("group"),
+    status: formData.get("status"),
+    visibility: formData.get("visibility"),
+  });
   await db.member.update({
     where: { id },
     data: {
-      name: String(formData.get("name")),
-      email: String(formData.get("email")),
-      phone: String(formData.get("phone") ?? "") || null,
-      group: String(formData.get("group")),
-      status: String(formData.get("status")),
-      visibility: String(formData.get("visibility")),
+      name: parsed.name,
+      email: parsed.email,
+      phone: parsed.phone || null,
+      group: parsed.group,
+      status: parsed.status,
+      visibility: parsed.visibility,
     },
   });
+  await logMutation(ctx, "Member", id, "update", existing, parsed);
   redirect("/admin/members");
 }
 
 async function deleteMember(formData: FormData) {
   "use server";
-  await db.member.delete({ where: { id: String(formData.get("id")) } });
+  const ctx = await authedAdmin();
+  const id = String(formData.get("id"));
+  const target = await db.member.findFirst({ where: { id, tenantId: ctx.tenant.id } });
+  if (!target) throw new Error("NOT_FOUND_OR_FORBIDDEN");
+  await db.member.delete({ where: { id } });
+  await logMutation(ctx, "Member", id, "delete", target, null);
   redirect("/admin/members");
 }
 
 export default async function MemberDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const tenant = await requireCurrentTenant();
+  const ctx = await authedAdmin();
   const member = await db.member.findFirst({
-    where: { id, tenantId: tenant.id },
+    where: { id, tenantId: ctx.tenant.id },
     include: {
       membershipPurchases: { include: { type: true }, orderBy: { validFrom: "desc" } },
       bookings: { orderBy: { startsAt: "desc" }, take: 10, include: { court: true } },
@@ -44,14 +72,14 @@ export default async function MemberDetail({ params }: { params: Promise<{ id: s
       <PageHeader title={member.name} desc={member.email} />
 
       <Card className="p-5">
-        <h2 className="font-bold mb-4">Stammdaten</h2>
+        <h2 className="font-semibold mb-4">Stammdaten</h2>
         <form action={updateMember} className="grid grid-cols-2 gap-4 max-w-2xl">
           <input type="hidden" name="id" value={member.id} />
           <FormField label="Name">
-            <input name="name" defaultValue={member.name} className={inputCls} />
+            <input name="name" defaultValue={member.name} required className={inputCls} />
           </FormField>
           <FormField label="E-Mail">
-            <input name="email" defaultValue={member.email} className={inputCls} />
+            <input name="email" type="email" defaultValue={member.email} required className={inputCls} />
           </FormField>
           <FormField label="Telefon">
             <input name="phone" defaultValue={member.phone ?? ""} className={inputCls} />
@@ -87,14 +115,14 @@ export default async function MemberDetail({ params }: { params: Promise<{ id: s
       </Card>
 
       <Card className="p-5">
-        <h2 className="font-bold mb-4">Mitgliedschaften</h2>
+        <h2 className="font-semibold mb-4">Mitgliedschaften</h2>
         <ul className="text-sm space-y-2">
-          {member.membershipPurchases.length === 0 && <li className="text-zinc-500">Keine.</li>}
+          {member.membershipPurchases.length === 0 && <li className="text-stone-500">Keine.</li>}
           {member.membershipPurchases.map((p) => (
-            <li key={p.id} className="flex justify-between border-b border-zinc-900 pb-2">
+            <li key={p.id} className="flex justify-between border-b border-stone-100 pb-2">
               <span>{p.type.name}</span>
-              <span className="text-zinc-500 text-xs">
-                {p.validFrom.toLocaleDateString("de-AT")} - {p.validUntil.toLocaleDateString("de-AT")} ·{" "}
+              <span className="text-stone-500 text-xs">
+                {p.validFrom.toLocaleDateString("de-AT")} — {p.validUntil.toLocaleDateString("de-AT")} ·{" "}
                 {fmtMoney(p.pricePaid)} · {p.paid ? "bezahlt" : "offen"}
               </span>
             </li>
@@ -103,12 +131,12 @@ export default async function MemberDetail({ params }: { params: Promise<{ id: s
       </Card>
 
       <Card className="p-5">
-        <h2 className="font-bold mb-4">Letzte Buchungen</h2>
+        <h2 className="font-semibold mb-4">Letzte Buchungen</h2>
         <ul className="text-sm space-y-1">
           {member.bookings.map((b) => (
             <li key={b.id} className="flex justify-between">
               <span>{b.court.name}</span>
-              <span className="text-zinc-500">
+              <span className="text-stone-500">
                 {b.startsAt.toLocaleString("de-AT", {
                   day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
                 })}
@@ -118,11 +146,19 @@ export default async function MemberDetail({ params }: { params: Promise<{ id: s
         </ul>
       </Card>
 
-      <Card className="p-5 border-red-900">
-        <h2 className="font-bold mb-2 text-red-400">Gefahrenzone</h2>
+      <Card className="p-5 border-red-200 bg-red-50/30">
+        <h2 className="font-semibold mb-2 text-red-700">Gefahrenzone</h2>
+        <p className="text-sm text-stone-600 mb-3">
+          Löschen entfernt das Mitglied unwiderruflich.
+        </p>
         <form action={deleteMember}>
           <input type="hidden" name="id" value={member.id} />
-          <Btn variant="danger" type="submit">Mitglied löschen</Btn>
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-full bg-red-600 text-white text-sm font-medium hover:bg-red-700"
+          >
+            Mitglied löschen
+          </button>
         </form>
       </Card>
     </div>

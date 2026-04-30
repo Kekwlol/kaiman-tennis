@@ -9,10 +9,13 @@ export function proxy(req: NextRequest) {
   const hostname = req.headers.get("host") ?? "";
   const url = req.nextUrl.clone();
 
-  // Override: ?_tenant=greinsfurth simuliert Subdomain (auch in Production fuer Demo-Zwecke)
+  // DEV-Override: ?_tenant=greinsfurth simuliert Subdomain (NUR ausserhalb Production!)
+  // In Production-Vercel: nur erlaubt wenn ALLOW_TENANT_OVERRIDE=1 (fuer Demo-Deployments)
   const tenantOverride = url.searchParams.get("_tenant");
+  const allowOverride =
+    process.env.NODE_ENV !== "production" || process.env.ALLOW_TENANT_OVERRIDE === "1";
   let ctx = parseTenant(hostname);
-  if (tenantOverride && ctx.source === "root") {
+  if (allowOverride && tenantOverride && ctx.source === "root") {
     ctx = { source: "subdomain", slug: tenantOverride, hostname };
   }
 

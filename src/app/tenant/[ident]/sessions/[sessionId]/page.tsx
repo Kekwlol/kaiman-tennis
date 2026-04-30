@@ -18,9 +18,10 @@ export default async function SessionDetail({
     },
   });
   if (!tenant) notFound();
+  const tenantId = tenant.id;
 
   const session = await db.openSession.findFirst({
-    where: { id: sessionId, tenantId: tenant.id },
+    where: { id: sessionId, tenantId: tenantId },
     include: {
       host: true,
       court: true,
@@ -34,23 +35,42 @@ export default async function SessionDetail({
     "use server";
     const memberId = String(formData.get("memberId"));
     if (!memberId || !session) return;
-    const exists = await db.openSessionParticipant.findUnique({
-      where: { sessionId_memberId: { sessionId: session.id, memberId } },
+
+    // Tenant-Match: Member muss zum gleichen Tenant gehoeren
+    const member = await db.member.findFirst({
+      where: { id: memberId, tenantId: tenantId },
     });
-    if (exists || memberId === session.hostId) return;
-    const filled = session.participants.length + 1;
-    if (filled >= session.maxPlayers) return;
-    await db.openSessionParticipant.create({ data: { sessionId: session.id, memberId } });
-    if (filled + 1 >= session.maxPlayers) {
-      await db.openSession.update({ where: { id: session.id }, data: { status: "full" } });
-    }
-    redirect(`/sessions/${session.id}`);
+    if (!member) throw new Error("MEMBER_NOT_FOUND_OR_FORBIDDEN");
+
+    // Race-Condition-sicher mit Transaction
+    await db.$transaction(async (tx) => {
+      const fresh = await tx.openSession.findUnique({
+        where: { id: session.id },
+        include: { participants: true },
+      });
+      if (!fresh) throw new Error("SESSION_GONE");
+      const filled = fresh.participants.length + 1; // +host
+      if (filled >= fresh.maxPlayers) throw new Error("SESSION_FULL");
+      if (memberId === fresh.hostId) throw new Error("HOST_CANNOT_JOIN");
+      const exists = fresh.participants.find((p) => p.memberId === memberId);
+      if (exists) return;
+      await tx.openSessionParticipant.create({ data: { sessionId: fresh.id, memberId } });
+      if (filled + 1 >= fresh.maxPlayers) {
+        await tx.openSession.update({ where: { id: fresh.id }, data: { status: "full" } });
+      }
+    });
+    redirect(`${base}/sessions/${session.id}`);
   }
 
   async function leaveSession(formData: FormData) {
     "use server";
     const memberId = String(formData.get("memberId"));
     if (!memberId || !session) return;
+    // Tenant-Match
+    const member = await db.member.findFirst({
+      where: { id: memberId, tenantId: tenantId },
+    });
+    if (!member) throw new Error("MEMBER_NOT_FOUND_OR_FORBIDDEN");
     await db.openSessionParticipant.deleteMany({
       where: { sessionId: session.id, memberId },
     });
@@ -58,7 +78,7 @@ export default async function SessionDetail({
       where: { id: session.id },
       data: { status: "open" },
     });
-    redirect(`/sessions/${session.id}`);
+    redirect(`${base}/sessions/${session.id}`);
   }
 
   const filled = session.participants.length + 1;

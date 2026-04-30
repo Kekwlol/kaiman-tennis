@@ -1,5 +1,9 @@
 import Link from "next/link";
 import { requireCurrentTenant } from "@/lib/tenant-context";
+import { getAuth, requireTenantAdmin } from "@/lib/auth";
+import { redirect } from "next/navigation";
+
+const ALLOW_DEMO = process.env.NODE_ENV !== "production" || process.env.ALLOW_TENANT_OVERRIDE === "1";
 
 const sections = [
   { title: "Verein", icon: "👥", items: [
@@ -47,6 +51,17 @@ const sections = [
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const tenant = await requireCurrentTenant();
+  // AUTH-GUARD: Production verlangt Login mit Tenant-Admin-Rolle.
+  // Im Demo-Mode (ALLOW_TENANT_OVERRIDE=1 oder dev) ist Admin offen fuer Demo.
+  const auth = await getAuth();
+  if (!ALLOW_DEMO) {
+    if (!auth) redirect("/login?next=/admin");
+    try {
+      await requireTenantAdmin(tenant.id);
+    } catch {
+      redirect("/login?error=forbidden");
+    }
+  }
   return (
     <div className="min-h-screen bg-stone-50 text-stone-900 flex">
       <aside className="w-72 bg-white border-r border-stone-200 sticky top-0 h-screen overflow-y-auto shrink-0 flex flex-col">

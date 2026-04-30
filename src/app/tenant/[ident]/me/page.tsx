@@ -4,9 +4,12 @@ import Link from "next/link";
 import { fmtLevel } from "@/lib/skill";
 import { fmtMoney } from "@/lib/money";
 import { MemberSwitcher } from "./switcher";
+import { getAuth } from "@/lib/auth";
+import { generateIcalToken } from "@/lib/auth";
 
-// "Mein Bereich" - Dashboard pro Mitglied
-// Im Dev: ?as=memberId um zu simulieren wer eingeloggt ist
+const ALLOW_DEMO_SWITCH =
+  process.env.NODE_ENV !== "production" || process.env.ALLOW_TENANT_OVERRIDE === "1";
+
 export default async function MyArea({
   params,
   searchParams,
@@ -25,10 +28,33 @@ export default async function MyArea({
   });
   if (!tenant) notFound();
 
-  const member = as
-    ? tenant.members.find((m) => m.id === as) ?? tenant.members[0]
-    : tenant.members[0];
-  if (!member) notFound();
+  // Auth: in Production muss ein eingeloggter Member da sein
+  const auth = await getAuth();
+  let member = auth?.memberId
+    ? tenant.members.find((m) => m.id === auth.memberId)
+    : null;
+
+  // Demo-Override (nur wenn explizit erlaubt)
+  if (!member && ALLOW_DEMO_SWITCH) {
+    member = as
+      ? tenant.members.find((m) => m.id === as) ?? tenant.members[0]
+      : tenant.members[0];
+  }
+
+  if (!member) {
+    // In Production ohne Auth: Login-Page
+    return (
+      <div className="max-w-md mx-auto bg-white border border-stone-200 rounded-2xl p-8 shadow-sm text-center">
+        <h1 className="text-2xl font-semibold mb-3">Anmeldung erforderlich</h1>
+        <p className="text-stone-600 mb-6">
+          Du musst eingeloggt sein um dein Profil zu sehen.
+        </p>
+        <Link href="/login" className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-stone-900 text-white font-medium">
+          Login &rarr;
+        </Link>
+      </div>
+    );
+  }
 
   const [bookings, openSessions, ladderEntries, teamMemberships, courseRegs, payments, wallet] = await Promise.all([
     db.booking.findMany({
@@ -72,16 +98,18 @@ export default async function MyArea({
 
   return (
     <div className="space-y-8">
-      {/* Member-Switcher (Dev-only) */}
-      <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 text-xs text-amber-900 flex items-center gap-3">
-        <span>🎭 Dev:</span>
-        <span>Eingeloggt als <strong>{member.name}</strong>.</span>
-        <span>Wechseln:</span>
-        <MemberSwitcher
-          members={tenant.members.map((m) => ({ id: m.id, name: m.name }))}
-          currentId={member.id}
-        />
-      </div>
+      {/* Member-Switcher nur im Dev/Demo-Mode */}
+      {ALLOW_DEMO_SWITCH && !auth && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 text-xs text-amber-900 flex items-center gap-3 flex-wrap">
+          <span>🎭 Demo:</span>
+          <span>Du siehst <strong>{member.name}</strong> als Beispiel.</span>
+          <span>Wechseln:</span>
+          <MemberSwitcher
+            members={tenant.members.map((m) => ({ id: m.id, name: m.name }))}
+            currentId={member.id}
+          />
+        </div>
+      )}
 
       {/* Profil-Hero */}
       <section className="bg-white border border-stone-200 rounded-2xl p-8 shadow-sm">
@@ -110,7 +138,7 @@ export default async function MyArea({
           </div>
 
           <a
-            href={`/api/ical/me?token=${member.id}`}
+            href={`/api/ical/me?token=${generateIcalToken(member.id)}`}
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-stone-200 text-sm hover:bg-stone-50 transition-colors"
           >
             📅 Kalender abonnieren
