@@ -1,10 +1,9 @@
-import { headers } from "next/headers";
+import { headers, cookies } from "next/headers";
 import { db } from "./db";
 import { notFound } from "next/navigation";
+import { createHash } from "node:crypto";
 
 // Liefert den Basis-Pfad fuer Tenant-interne Links.
-// - Auf Subdomain/Custom-Domain: leerer String (Links sind /reservierung etc.)
-// - Auf Root mit Direct-Path: /tenant/{slug} als Prefix (Links werden /tenant/greinsfurth/reservierung)
 export async function getTenantBasePath(slug: string): Promise<string> {
   const h = await headers();
   const source = h.get("x-tenant-source") || "root";
@@ -12,8 +11,7 @@ export async function getTenantBasePath(slug: string): Promise<string> {
   return `/tenant/${slug}`;
 }
 
-// Liest den Tenant aus den Headers die proxy.ts gesetzt hat.
-// Für Server Components und Route Handlers gleichermaszen.
+// Liest Tenant aus 1) Header (Subdomain) 2) eingeloggter Session 3) gibt null
 export async function getCurrentTenant() {
   const h = await headers();
   const slug = h.get("x-tenant-slug");
@@ -26,6 +24,19 @@ export async function getCurrentTenant() {
   if (host) {
     const t = await db.tenant.findUnique({ where: { customDomain: host } });
     if (t) return t;
+  }
+  // Fallback: Session-User → sein Tenant
+  const c = await cookies();
+  const sessionToken = c.get("kt_session")?.value;
+  if (sessionToken) {
+    const hashed = createHash("sha256").update(sessionToken).digest("hex");
+    const session = await db.session.findUnique({
+      where: { token: hashed },
+      include: { user: { include: { tenant: true } } },
+    });
+    if (session && session.expiresAt > new Date()) {
+      return session.user.tenant;
+    }
   }
   return null;
 }
