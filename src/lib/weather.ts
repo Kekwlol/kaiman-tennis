@@ -24,9 +24,14 @@ export async function fetchHourlyForecast(
   url.searchParams.set("timezone", "Europe/Vienna");
 
   try {
+    // Timeout auf 3s damit Reservierung-Page nie haengt
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
     const res = await fetch(url.toString(), {
       next: { revalidate: 1800 }, // 30min Cache
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json() as {
       hourly: { time: string[]; temperature_2m: number[]; precipitation: number[]; weather_code: number[] };
