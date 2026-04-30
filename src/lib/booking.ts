@@ -1,6 +1,6 @@
 import { db } from "./db";
 import { validateBooking } from "./booking-rules";
-import { calculatePrice } from "./pricing";
+import { calculatePrice, loadZones, priceFromZones } from "./pricing";
 import { notify } from "./notifications";
 import { executeDevice } from "./devices";
 import { fetchHourlyForecast, weatherEmoji } from "./weather";
@@ -29,11 +29,13 @@ export async function getAvailability(
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
 
-  const [courts, bookings] = await Promise.all([
+  // Alle Daten parallel laden (statt N+1 calculatePrice-Calls)
+  const [courts, bookings, zones] = await Promise.all([
     db.court.findMany({ where: { tenantId, active: true }, orderBy: { order: "asc" } }),
     db.booking.findMany({
       where: { tenantId, startsAt: { gte: dayStart, lt: dayEnd }, status: "confirmed" },
     }),
+    loadZones(tenantId),
   ]);
 
   const hasOutdoor = courts.some((c) => c.category === "outdoor" || c.category === "allweather");
@@ -57,11 +59,9 @@ export async function getAvailability(
           b.startsAt.getTime() < end.getTime() &&
           b.endsAt.getTime() > start.getTime(),
       );
-      const priceCents = await calculatePrice({
-        tenantId,
+      const priceCents = priceFromZones(zones, {
         courtId: court.id,
         startsAt: start,
-        endsAt: end,
         memberGroup,
       });
 
