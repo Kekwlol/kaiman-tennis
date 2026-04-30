@@ -8,7 +8,13 @@ const ROOT_DOMAINS = [
   "localhost",
   "127.0.0.1",
   "127.0.0.1:3000",
+  "kaiman-tennis.vercel.app",
 ];
+
+// Vercel-Preview-URLs: kaiman-tennis-xxx-kaidigital.vercel.app
+function isVercelPreview(host: string): boolean {
+  return /\.vercel\.app$/.test(host);
+}
 
 export type TenantSource = "subdomain" | "custom-domain" | "root";
 
@@ -25,7 +31,7 @@ export function parseTenant(hostname: string): TenantContext {
   const cleanHost = hostname.toLowerCase().replace(/^www\./, "");
 
   // Root-Domain selbst -> kein Tenant
-  if (ROOT_DOMAINS.includes(cleanHost)) {
+  if (ROOT_DOMAINS.includes(cleanHost) || isVercelPreview(cleanHost)) {
     return { source: "root", slug: null, hostname: cleanHost };
   }
 
